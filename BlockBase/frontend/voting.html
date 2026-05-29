@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Token Voting</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #ddd;
+               max-width: 680px; margin: 0 auto; padding: 2rem 1rem; }
+        h1   { font-size: 1.4rem; margin-bottom: 0.25rem; }
+        .sub { color: #666; font-size: 0.85rem; margin-bottom: 2rem; }
+        .card      { background: #161616; border: 1px solid #2a2a2a;
+                     border-radius: 10px; padding: 1.4rem; margin: 1rem 0; }
+        .card h2   { margin: 0 0 1rem; font-size: 1rem; color: #eee; }
+        button     { background: #2563eb; color: #fff; border: none; border-radius: 6px;
+                     padding: 0.55rem 1.2rem; cursor: pointer; font-size: 0.85rem;
+                     margin-top: 0.5rem; }
+        button:disabled { background: #222; color: #555; cursor: not-allowed; }
+        input, select   { width: 100%; padding: 0.5rem 0.75rem; background: #111;
+                          border: 1px solid #333; border-radius: 6px; color: #ddd;
+                          font-size: 0.85rem; margin-top: 0.5rem; }
+        .candidate      { border: 1px solid #2a2a2a; border-radius: 8px;
+                          padding: 1rem; margin: 0.6rem 0; }
+        .candidate h3   { margin: 0 0 0.25rem; font-size: 0.95rem; color: #eee; }
+        .cand-desc      { font-size: 0.8rem; color: #666; margin-bottom: 0.75rem; }
+        .bar-wrap       { background: #222; border-radius: 4px; height: 6px; margin: 0.5rem 0; }
+        .bar            { background: #2563eb; height: 6px; border-radius: 4px;
+                          transition: width 0.5s; }
+        .vote-count     { font-size: 0.78rem; color: #555; }
+        #status         { font-size: 0.82rem; margin-top: 0.75rem; min-height: 1.2em; color: #888; }
+        #status.err     { color: #f87171; }
+        #status.ok      { color: #4ade80; }
+        .addr           { font-size: 0.75rem; font-family: monospace; color: #555;
+                          word-break: break-all; }
+        .banner         { background: #1e3a8a; border: 1px solid #3b82f6; border-radius: 8px; padding: 1rem; margin: 1rem 0; text-align: center;}
+        .log-item       { font-family: monospace; font-size: 0.75rem; border-bottom: 1px solid #222; padding: 0.4rem 0; color: #aaa;}
+    </style>
+</head>
+<body>
+    <h1>Token Voting</h1>
+    <p class="sub">Cast weighted votes using your ERC-20 tokens.</p>
+
+    <div id="winnerBanner" class="banner" style="display:none"></div>
+
+    <div class="card">
+        <h2>Wallet</h2>
+        <button id="connectBtn" onclick="connectWallet()">Connect MetaMask</button>
+        <p class="addr" id="walletAddr">Not connected</p>
+        <p style="margin:0.5rem 0 0;font-size:0.85rem">
+            Token balance: <strong id="tokenBal">&mdash;</strong>
+        </p>
+        <p style="margin:0.25rem 0 0;font-size:0.85rem">
+            Voting: <strong id="votingStatus">&mdash;</strong>
+        </p>
+    </div>
+
+    <div class="card" id="ownerCard" style="display:none">
+        <h2>Owner Dashboard</h2>
+        <button id="closeVotingBtn" onclick="ownerCloseVoting()">Close Voting Session</button>
+    </div>
+
+    <div class="card">
+        <h2>Candidates</h2>
+        <div id="candidateList">
+            <p style="color:#555;font-size:0.85rem">
+                Connect wallet to load candidates.
+            </p>
+        </div>
+    </div>
+
+    <div class="card" id="voteCard" style="display:none">
+        <h2>Cast Your Vote</h2>
+        <select id="candidateSelect">
+            <option value="">Select a candidate</option>
+        </select>
+        <input type="number" id="voteAmount"
+               placeholder="Tokens to commit (e.g. 100)" min="1" step="any" />
+        <button id="submitVoteBtn" onclick="castVote()">Approve & Vote</button>
+        <p id="status"></p>
+    </div>
+
+    <div class="card" id="logCard" style="display:none">
+        <h2>Live Voting History Log</h2>
+        <div id="historyLogs"></div>
+    </div>
+
+    <script src="https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script>
+        // ── Replace with your deployed addresses ──────────────────
+        const VOTING_ADDRESS = "0x57492757C9868c6B547E926c4D4e25b86835C5BA";
+        const TOKEN_ADDRESS  = "0xe97410441A677b214Ac064f2a06418AF384Dd7Ea";
+        // ─────────────────────────────────────────────────────────
+
+        const VOTING_ABI = [
+            "function owner() view returns (address)",
+            "function votingOpen() view returns (bool)",
+            "function getCandidateCount() view returns (uint256)",
+            "function getCandidate(uint256 id) view returns (string name, string description, uint256 totalVotes)",
+            "function hasVoted(address) view returns (bool)",
+            "function vote(uint256 candidateId, uint256 amount)",
+            "function closeVoting()",
+            "function getWinnerId() view returns (uint256)",
+            "event VoteCast(address indexed voter, uint256 indexed candidateId, uint256 weight)"
+        ];
+        const TOKEN_ABI = [
+            "function balanceOf(address) view returns (uint256)",
+            "function symbol() view returns (string)",
+            "function approve(address spender, uint256 amount) returns (bool)"
+        ];
+
+        let provider, signer, votingContract, tokenContract, userAddress;
+
+        async function connectWallet() {
+            if (!window.ethereum) { setStatus("MetaMask not found.", "err"); return; }
+            provider = new ethers.providers.Web3Provider(window.ethereum);
+            await provider.send("eth_requestAccounts", []);
+            const network = await provider.getNetwork();
+            if (network.chainId !== 11155111) {
+                setStatus("Switch MetaMask to Sepolia and try again.", "err");
+                return;
+            }
+            signer      = provider.getSigner();
+            userAddress = await signer.getAddress();
+            document.getElementById("connectBtn").textContent = "Connected";
+            document.getElementById("connectBtn").disabled    = true;
+            document.getElementById("walletAddr").textContent = userAddress;
+
+            votingContract = new ethers.Contract(VOTING_ADDRESS, VOTING_ABI, signer);
+            tokenContract  = new ethers.Contract(TOKEN_ADDRESS,  TOKEN_ABI,  signer);
+
+            await loadData();
+            await fetchHistoryLogs();
+            
+            // Listen real-time to updating balances or changes
+            votingContract.on("VoteCast", async () => {
+                await loadData();
+                await fetchHistoryLogs();
+            });
+        }
+
+        async function loadData() {
+            const [count, open, voted, bal, sym, contractOwner] = await Promise.all([
+                votingContract.getCandidateCount(),
+                votingContract.votingOpen(),
+                votingContract.hasVoted(userAddress),
+                tokenContract.balanceOf(userAddress),
+                tokenContract.symbol(),
+                votingContract.owner()
+            ]);
+
+            document.getElementById("tokenBal").textContent =
+                ethers.utils.formatUnits(bal, 18) + " " + sym;
+            document.getElementById("votingStatus").textContent =
+                open ? "Open" : "Closed";
+
+            // Reveal Owner Admin Dashboard if applicable
+            if(userAddress.toLowerCase() === contractOwner.toLowerCase() && open) {
+                document.getElementById("ownerCard").style.display = "block";
+            } else {
+                document.getElementById("ownerCard").style.display = "none";
+            }
+
+            // Accumulate total weight for percentage bars
+            let totalWeight = ethers.BigNumber.from(0);
+            const data = [];
+            for (let i = 0; i < count; i++) {
+                const [name, desc, votes] = await votingContract.getCandidate(i);
+                data.push({ name, desc, votes });
+                totalWeight = totalWeight.add(votes);
+            }
+
+            // Render candidate cards
+            const list   = document.getElementById("candidateList");
+            const select = document.getElementById("candidateSelect");
+            list.innerHTML   = "";
+            select.innerHTML = "<option value=''>Select a candidate</option>";
+
+            data.forEach((c, i) => {
+                const pct = totalWeight.gt(0)
+                    ? Math.round(c.votes.mul(100).div(totalWeight).toNumber())
+                    : 0;
+                list.innerHTML +=
+                    `<div class="candidate">` +
+                    `  <h3>${c.name}</h3>` +
+                    `  <p class="cand-desc">${c.desc}</p>` +
+                    `  <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>` +
+                    `  <span class="vote-count">` +
+                    `    ${ethers.utils.formatUnits(c.votes, 18)} tokens (${pct}%)` +
+                    `  </span>` +
+                    `</div>`;
+                select.innerHTML += `<option value="${i}">${c.name}</option>`;
+            });
+
+            // Handle UI layout visibility changes depending on lifecycle conditions
+            const voteCard = document.getElementById("voteCard");
+            const banner = document.getElementById("winnerBanner");
+
+            if (!open) {
+                voteCard.style.display = "none";
+                setStatus("Voting is closed.", "");
+                
+                try {
+                    const winnerId = await votingContract.getWinnerId();
+                    const winnerData = data[winnerId.toNumber()];
+                    if (winnerData) {
+                        banner.style.display = "block";
+                        banner.innerHTML = `🎉 <strong>Winner Announced:</strong> ${winnerData.name} wins with ${ethers.utils.formatUnits(winnerData.votes, 18)} ${sym}!`;
+                    }
+                } catch(e) {
+                    console.log("No candidates found or error fetching winner index.");
+                }
+            } else {
+                banner.style.display = "none";
+                voteCard.style.display = (!voted) ? "block" : "none";
+                if (voted) setStatus("You have already voted.", "");
+            }
+        }
+
+        async function castVote() {
+            const candidateId = document.getElementById("candidateSelect").value;
+            const amountStr   = document.getElementById("voteAmount").value;
+            const submitBtn   = document.getElementById("submitVoteBtn");
+            
+            if (!candidateId)                  { setStatus("Select a candidate.", "err"); return; }
+            if (!amountStr || +amountStr <= 0) { setStatus("Enter an amount > 0.", "err"); return; }
+
+            const amount = ethers.utils.parseUnits(amountStr, 18);
+            
+            try {
+                submitBtn.disabled = true;
+                
+                // Step 1 — Approve the voting contract to spend the tokens
+                setStatus("Step 1/2: Submitting approval transaction...", "");
+                const approveTx = await tokenContract.approve(VOTING_ADDRESS, amount);
+                setStatus("Step 1/2: Waiting for confirmation...", "");
+                await approveTx.wait();
+
+                // Step 2 — Cast the vote
+                setStatus("Step 2/2: Submitting vote transaction...", "");
+                const voteTx = await votingContract.vote(candidateId, amount);
+                setStatus("Step 2/2: Confirming ballot settlement...", "");
+                await voteTx.wait();
+
+                // Step 3 — Success handling
+                setStatus("Ballot success! Vote recorded.", "ok");
+                await loadData();
+            } catch (err) {
+                console.error(err);
+                setStatus(err.reason || err.message || "Transaction failed.", "err");
+            } finally {
+                submitBtn.disabled = false;
+            }
+        }
+
+        async function ownerCloseVoting() {
+            try {
+                setStatus("Submitting closing sequence...", "");
+                const tx = await votingContract.closeVoting();
+                await tx.wait();
+                setStatus("Voting closed successfully.", "ok");
+                await loadData();
+            } catch(err) {
+                setStatus(err.reason || err.message, "err");
+            }
+        }
+
+        async function fetchHistoryLogs() {
+            try {
+                const logContainer = document.getElementById("historyLogs");
+                const filter = votingContract.filters.VoteCast();
+                const events = await votingContract.queryFilter(filter, -5000); // look up last ~5000 blocks
+                
+                if(events.length > 0) {
+                    document.getElementById("logCard").style.display = "block";
+                    logContainer.innerHTML = "";
+                    events.reverse().forEach(event => {
+                        const voter = event.args.voter;
+                        const candId = event.args.candidateId.toString();
+                        const weight = ethers.utils.formatUnits(event.args.weight, 18);
+                        logContainer.innerHTML += `
+                            <div class="log-item">
+                                Account <strong>${voter.substring(0,6)}...${voter.substring(38)}</strong> voted 
+                                <strong>${weight} tokens</strong> for Candidate ID [${candId}]
+                            </div>`;
+                    });
+                }
+            } catch (e) {
+                console.error("Error loading logs:", e);
+            }
+        } 
+         function setStatus(msg, type) {
+       const el = document.getElementById("status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = type; // Applies red for 'err', green for 'ok'
+       }
+    </script>
+</body>
+</html>
